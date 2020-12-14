@@ -1,0 +1,3 @@
+#!/bin/bash
+
+export GOLLY_PYTHON_HOME="${HOME}/golly/golly-python"
