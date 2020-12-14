@@ -18,7 +18,7 @@ with open(path.join(this_directory, 'Readme.md'), encoding='utf-8') as f:
 from golly_python import __version__
 
 setup(
-    name='golly-maps',
+    name='golly-python',
     version=__version__,
     packages=['golly_python'],
     description='golly-python is a package for running Game of Life simulations for Golly',
