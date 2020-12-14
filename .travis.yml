@@ -1,0 +1,13 @@
+language: python
+dist: xenial
+python:
+- '3.7'
+
+before_install:
+- sudo apt-get install jq
+install:
+- make requirements
+- make requirements-dev
+- make build
+script:
+- make test
