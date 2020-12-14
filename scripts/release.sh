@@ -51,10 +51,3 @@ git tag $RELEASE_TAG
 git push --force gh $PROMOTE_DEST_BRANCH
 git push --tags gh
 
-if [[ -e "${GOLLY_PYTHON_HOME}/environment.${PROMOTE_DEST_BRANCH}" ]]; then
-    source "${GOLLY_PYTHON_HOME}/environment.${PROMOTE_DEST_BRANCH}"
-    make -C "$GOLLY_PYTHON_HOME" deploy
-else
-    echo "Could not find environment config file ${GOLLY_PYTHON_HOME}/environment.${PROMOTE_DEST_BRANCH}. Unable to deploy."
-fi
-
