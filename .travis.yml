@@ -6,8 +6,10 @@ python:
 before_install:
 - sudo apt-get install jq
 install:
+- source environment
 - make requirements
 - make requirements-dev
 - make build
 script:
+- source environment
 - make test
