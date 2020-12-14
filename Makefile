@@ -17,7 +17,7 @@ requirements-dev:
 build: clean
 	python3 setup.py build install
 
-test: dev build
+test: requirements-dev build
 	pytest
 
 release_main:
