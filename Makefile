@@ -11,7 +11,7 @@ help:
 requirements:
 	python3 -m pip install --upgrade -r requirements.txt
 
-dev:
+requirements-dev:
 	python3 -m pip install --upgrade -r requirements-dev.txt
 
 build: clean
