@@ -23,7 +23,10 @@ requirements-dev:
 	python3 -m pip install --upgrade -r requirements-dev.txt
 
 build: clean
-	python3 setup.py build install
+	CYTHONIZE=1 python3 setup.py build
+
+install:
+	CYTHONIZE=1 pip3 install .
 
 test: requirements-dev build
 	pytest
@@ -33,4 +36,9 @@ release_main:
 	scripts/release.sh $(CB) main
 
 clean:
-	rm -fr build dist __pycache__ *.egg-info/
+	$(RM) -fr build dist __pycache__ *.egg-info/
+	$(RM) -r golly_python/pylife.c
+	find . -name __pycache__ -exec rm -r {} +
+
+uninstall:
+	pip uninstall golly_python
