@@ -107,6 +107,8 @@ class GOL(object):
         s1 = json.loads(self.ic1)
         s2 = json.loads(self.ic2)
 
+        # Here, we should create a new Life object instead.........
+
         for s1row in s1:
             for y in s1row:
                 yy = int(y)
