@@ -27,7 +27,7 @@ def no_cythonize(extensions, **_ignore):
 
 
 extensions = [
-    Extension("golly_python.pylife", ["golly_python/pylife.pyx"]),
+    Extension("golly_python.life", ["golly_python/life.pyx"]),
 ]
 
 if CYTHONIZE:
