@@ -1,4 +1,4 @@
-from setuptools import setup, find_packages
+from setuptools import setup, find_packages, Extension
 import glob
 import os
 from os import path
@@ -27,8 +27,10 @@ def no_cythonize(extensions, **_ignore):
 
 
 extensions = [
-    Extension("golly_python.life", ["golly_python/life.pyx"]),
+    Extension("life", ["golly_python/life.pyx"]),
 ]
+
+CYTHONIZE = bool(int(os.getenv("CYTHONIZE", 0))) and cythonize is not None
 
 if CYTHONIZE:
     compiler_directives = {"language_level": 3, "embedsignature": True}
@@ -48,7 +50,6 @@ with open(path.join(this_directory, 'Readme.md'), encoding='utf-8') as f:
     long_description = f.read()
 
 # Note: the _program variable is set in __init__.py.
-# it determines the name of the command line tool.
 from golly_python import __version__
 
 setup(

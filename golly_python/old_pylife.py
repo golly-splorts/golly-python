@@ -1,73 +1,12 @@
-# cython: language_level=3
-# cython: boundscheck=False
-# cython: wraparound=False
-# cython: initializedcheck=False
-# cython: cdivision = True
-# cython: always_allow_keywords =False
-# cython: unraisable_tracebacks = False
-# cython: binding = False
-
-from libc.stdlib cimport rand
-from libcpp.vector cimport vector
-from cpython cimport array
-import cython
-cimport numpy as np
+from operator import indexOf
+import json
 
 
-cdef class LiveCount:
-
-    cdef int generation
-    cdef int liveCells
-    cdef int liveCells1
-    cdef int liveCells2
-    cdef float victoryPct
-    cdef float coverage
-    cdef float territory1
-    cdef float territory2
-
-    def __cinit__(self,
-        int generation,
-        int liveCells,
-        int liveCells1,
-        int liveCells2,
-        float victoryPct,
-        float coverage,
-        float territory1,
-        float territory2
-    ):
-        self.generation = generation
-        self.liveCells  = liveCells
-        self.liveCells1 = liveCells1
-        self.liveCells2 = liveCells2
-        self.victoryPct = victoryPct
-        self.coverage   = coverage
-        self.territory1 = territory1
-        self.territory2 = territory2
-
-
-cdef class Life:
-
-    cdef vector[vector[int]] actual_state
-    cdef vector[vector[int]] actual_state1
-    cdef vector[vector[int]] actual_state2
-
-    cdef vector[vector[int]] redraw_list
-
-    cdef int who_won
-    cdef bint found_victor
-
-    cdef int generation, columns, rows
-    cdef int livecells, livecells1, livecells2
-    cdef float victory, coverage, territory1, territory2
-
-    cdef float* running_avg_window
-    cdef float[3] running_avg_last3
-    cdef float SMOL, TOL
-    cdef int RUNNING_AVG_WINDOW_SIZE
-
-    cdef int top_pointer, bottom_pointer
-    cdef bint running
-
+class GOL(object):
+    team_names: list = []
+    actual_state: list = []
+    actual_state1: list = []
+    actual_state2: list = []
     generation = 0
     columns = 0
     rows = 0
@@ -78,101 +17,168 @@ cdef class Life:
     coverage = 0.0
     territory1 = 0.0
     territory2 = 0.0
+    found_victor = False
+    running_avg_window: list = []
+    running_avg_last3: list = [0.0, 0.0, 0.0]
+    running = False
 
-    def __cinit__(self, dict s1, dict s2, int rows, int columns, bint neighbor_color_legacy_mode = False):
-        self.SMOL = 1e-12
-        self.TOL = 1e-8
-        self.running = False
+    def __init__(self, **kwargs):
+        """Constructor just sets everything up"""
+        self.load_config(**kwargs)
+        self.load_state()
+        self.prepare()
+        self.running = True
 
-        self.RUNNING_AVG_WINDOW_SIZE = 240
-        self.running_avg_window = <float*> PyMem_Malloc(self.RUNNING_AVG_WINDOW_SIZE * sizeof(float))
-        for i in range(self.RUNNING_AVG_WINDOW_SIZE):
-            self.running_avg_window[i] = 0.0
+    def __repr__(self):
+        s = []
+        s.append("+" + "-" * (self.columns) + "+")
+        for i in range(self.rows):
+            row = "|"
+            for j in range(self.columns):
+                if self.is_alive(j, i):
+                    color = self.get_cell_color(j, i)
+                    if color == 1:
+                        row += "#"
+                    elif color == 2:
+                        row += "o"
+                    else:
+                        row += "?"
+                else:
+                    row += "."
+            row += "|"
+            s.append(row)
+        s.append("+" + "-" * (self.columns) + "+")
+        rep = "\n".join(s)
+        rep += "\n"
 
-        for i in range(3):
-            self.runing_avg_last3[i] = 0.0
+        livecounts = self.get_live_counts()
 
-        self.generations = 0
-        self.rows = rows
-        self.columns = columns
+        rep += "\nGeneration: %d" % (self.generation)
+        rep += "\nLive cells, color 1: %d" % (livecounts["liveCells1"])
+        rep += "\nLive cells, color 2: %d" % (livecounts["liveCells2"])
+        rep += "\nLive cells, total: %d" % (livecounts["liveCells"])
+        rep += "\nVictory Percent: %0.1f %%" % (livecounts["victoryPct"])
+        rep += "\nCoverage: %0.2f %%" % (livecounts["coverage"])
+        rep += "\nTerritory, color 1: %0.2f %%" % (livecounts["territory1"])
+        rep += "\nTerritory, color 2: %0.2f %%" % (livecounts["territory2"])
 
-        self.livecells = 0
-        self.livecells1 = 0
-        self.livecells2 = 0
+        return rep
 
-        self.victory = 0.0
-        self.coverage = 0.0
-        self.territory1 = 0.0
-        self.territory2 = 0.0
-        self.neighbor_color_legacy_mode = neighbor_color_legacy_mode
+    def load_config(self, **kwargs):
+        """Load configuration from user-provided input params"""
+        if "s1" in kwargs and "s2" in kwargs:
+            self.ic1 = kwargs["s1"]
+            self.ic2 = kwargs["s2"]
+        else:
+            raise Exception("ERROR: s1 and s2 parameters must both be specified")
 
-        # We expect the manager class to parse the JSON
+        if "rows" in kwargs and "columns" in kwargs:
+            self.rows = kwargs["rows"]
+            self.columns = kwargs["columns"]
+        else:
+            raise Exception(
+                "ERROR: rows and columns parameters must be provided to GOL constructor"
+            )
+
+        if "team1" in kwargs and "team2" in kwargs:
+            self.team_names = [kwargs["team1"], kwargs["team2"]]
+        else:
+            self.team_names = ["Team 1", "Team 2"]
+
+        # Whether to stop when a victor is detected
+        if "halt" in kwargs:
+            self.halt = kwargs["halt"]
+        else:
+            self.halt = True
+        self.found_victor = False
+
+        # Neighbor color legacy mode was used in Seasons 1-3
+        if "neighbor_color_legacy_mode" in kwargs:
+            self.neighbor_color_legacy_mode = kwargs["neighbor_color_legacy_mode"]
+        else:
+            self.neighbor_color_legacy_mode = False
+
+    def load_state(self):
+        """
+        Load the listlife state from the initial conditions.
+        Initial conditions are set in the load_config() function
+        and are specified as part of the map.
+        """
+        s1 = json.loads(self.ic1)
+        s2 = json.loads(self.ic2)
+
+        # Here, we should create a new Life object instead.........
+
         for s1row in s1:
             for y in s1row:
                 yy = int(y)
                 for xx in s1row[y]:
-                    self.add_cell_inplace(xx, yy, self.actual_state)
-                    self.add_cell_inplace(xx, yy, self.actual_state1)
-        
+                    self.actual_state = self.add_cell(xx, yy, self.actual_state)
+                    self.actual_state1 = self.add_cell(xx, yy, self.actual_state1)
+
         for s2row in s2:
             for y in s2row:
                 yy = int(y)
                 for xx in s2row[y]:
-                    self.add_cell_inplace(xx, yy, self.actual_state)
-                    self.add_cell_inplace(xx, yy, self.actual_state2)
-    
+                    self.actual_state = self.add_cell(xx, yy, self.actual_state)
+                    self.actual_state2 = self.add_cell(xx, yy, self.actual_state2)
+
+        maxdim = 240
+        # maxdim = max(2 * self.columns, 2 * self.rows)
+        self.running_avg_window = [
+            0,
+        ] * maxdim
+
     def prepare(self):
         # This actually inserts a calculation, I don't think we want that?
         livecounts = self.get_live_counts()
         self.update_moving_avg(livecounts)
 
-    def update_moving_avg(self, LiveCount livecounts):
-        cdef int summ = 0
-        cdef float running_avg
-        cdef bint b1, b2, zerocells
-
+    def update_moving_avg(self, livecounts):
         if not self.found_victor:
-            maxdim = self.RUNNING_AVG_WINDOW_SIZE
+            maxdim = max(2 * self.columns, 2 * self.rows)
             if self.generation < maxdim:
-                self.running_avg_window[self.generation] = livecounts.victoryPct
+                self.running_avg_window[self.generation] = livecounts["victoryPct"]
             else:
-                self.running_avg_window = self.running_avg_window[1:] + [livecounts.victoryPct]
+                self.running_avg_window = self.running_avg_window[1:] + [
+                    livecounts["victoryPct"]
+                ]
+                summ = sum(self.running_avg_window)
+                running_avg = summ / (1.0 * len(self.running_avg_window))
 
-            summ = sum(self.running_avg_window)
-            running_avg = summ / (1.0 * len(self.running_avg_window))
+                # update running average last 3
+                removed = self.running_avg_last3[0]
+                self.running_avg_last3 = self.running_avg_last3[1:] + [running_avg]
 
-            # update running average last 3
-            removed = self.running_avg_last3[0]
-            self.running_avg_last3 = self.running_avg_last3[1:] + [running_avg]
+                tol = 1e-8
+                # skip the first few steps where we're removing zeros
+                if not self.approx_equal(removed, 0.0, tol):
+                    b1 = self.approx_equal(
+                        self.running_avg_last3[0], self.running_avg_last3[1], tol
+                    )
+                    b2 = self.approx_equal(
+                        self.running_avg_last3[1], self.running_avg_last3[2], tol
+                    )
+                    zerocells = (
+                        livecounts["liveCells1"] == 0 or livecounts["liveCells2"] == 0
+                    )
+                    if (b1 and b2) or zerocells:
+                        z1 = self.approx_equal(self.running_avg_last3[0], 50.0, tol)
+                        z2 = self.approx_equal(self.running_avg_last3[1], 50.0, tol)
+                        z3 = self.approx_equal(self.running_avg_last3[2], 50.0, tol)
+                        if (not (z1 or z2 or z3)) or zerocells:
+                            if livecounts["liveCells1"] > livecounts["liveCells2"]:
+                                self.found_victor = True
+                                self.who_won = 1
+                            elif livecounts["liveCells1"] < livecounts["liveCells2"]:
+                                self.found_victor = True
+                                self.who_won = 2
 
-            # skip the first few steps where we're removing zeros
-            if not self.approx_equal(removed, 0.0, self.TOL):
-                b1 = self.approx_equal(
-                    self.running_avg_last3[0], self.running_avg_last3[1], self.TOL
-                )
-                b2 = self.approx_equal(
-                    self.running_avg_last3[1], self.running_avg_last3[2], self.TOL
-                )
-                zerocells = (
-                    livecounts["liveCells1"] == 0 or livecounts["liveCells2"] == 0
-                )
+    def approx_equal(self, a, b, tol):
+        SMOL = 1e-12
+        return (abs(b - a) / abs(a + SMOL)) < tol
 
-                if (b1 and b2) or zerocells:
-                    z1 = self.approx_equal(self.running_avg_last3[0], 50.0, self.TOL)
-                    z2 = self.approx_equal(self.running_avg_last3[1], 50.0, self.TOL)
-                    z3 = self.approx_equal(self.running_avg_last3[2], 50.0, self.TOL)
-                    if (not (z1 or z2 or z3)) or zerocells:
-                        if livecounts["liveCells1"] > livecounts["liveCells2"]:
-                            self.found_victor = True
-                            self.who_won = 1
-                        elif livecounts["liveCells1"] < livecounts["liveCells2"]:
-                            self.found_victor = True
-                            self.who_won = 2
-
-    def approx_equal(self, float a, float b, float tol):
-        return (abs(b - a) / abs(a + self.SMOL)) < tol
-
-    def is_alive(self, int x, int y):
+    def is_alive(self, x, y):
         """
         Boolean function: is the cell at x, y alive
         """
@@ -184,7 +190,7 @@ cdef class Life:
 
         return False
 
-    def get_cell_color(self, int x, int y):
+    def get_cell_color(self, x, y):
         """
         Get the color of the given cell (1 or 2)
         """
@@ -206,7 +212,7 @@ cdef class Life:
 
         return 0
 
-    def remove_cell(self, int x, int y, vector[vector[int]] state):
+    def remove_cell(self, x, y, state):
         """
         Remove the given cell from the given listlife state
         """
@@ -220,105 +226,76 @@ cdef class Life:
                     j = indexOf(row, x)
                     state[i] = row[:j] + row[j + 1 :]
 
-    def add_cell_inplace(self, int x, int y, vector[vector[int]] state):
+    def add_cell(self, x, y, state):
         """
-        Add the cell at (x, y) to the state
+        State is a list of arrays, where the y-coordinate is the first element,
+        and the rest of the elements are x-coordinates:
+          [y1, x1, x2, x3, x4]
+          [y2, x5, x6, x7, x8, x9]
+          [y3, x10]
         """
-        cdef vector[int] row_temp
-        cdef vector[int] row_iter
-        cdef int c
-                    
-        row_temp.clear()
-        row_iter.clear()
-
         # Empty state case
         if len(state) == 0:
-            row_temp.push_back(y)
-            row_temp.push_back(x)
-            state.push_back(row_temp)
+            return [[y, x]]
 
-        # Determine where in list to insert new cell
+        # figure out where in the list to insert the new cell
         if y < state[0][0]:
             # y is smaller than any existing y,
-            # put this point at beginning
-            row_temp.push_back(y)
-            row_temp.push_back(x)
-
-            state.insert(state.beginning(), row_temp)
+            # so put this point at beginning
+            return [[y, x]] + state
 
         elif y > state[-1][0]:
             # y is larger than any existing y,
-            # put this point at end
-            row_temp.push_back(y)
-            row_temp.push_back(x)
-            state.push_back(row_temp)
+            # so put this point at end
+            return state + [[y, x]]
 
         else:
+            # Adding to the middle
+            new_state = []
             added = False
-            for row_iter in state:
-                if (not added) and (row_iter[0] == y):
-                    # This is our level, it already exists
-                    row_temp.push_back(y)
-                    for c in range(1, len(row_iter)):
-                        # Iterate over each x item in the list,
-                        # stopping to insert our new x location
-                        # in the correct location to preserve order
-                        if (not added) and (x < row_iter[c]):
-                            row_temp.push_back(x)
+            for row in state:
+                if (not added) and (row[0] == y):
+                    # This level already exists
+                    new_row = [y]
+                    for c in row[1:]:
+                        if (not added) and (x < c):
+                            new_row.append(x)
                             added = True
-                        row_temp.push_back(row_iter[c])
-                    # If we reach the end and have not added the new x,
-                    # tack it on at the end
+                        new_row.append(c)
                     if not added:
-                        row_temp.push_back(x)
+                        new_row.append(x)
                         added = True
-                    state.push_back(row_temp)
-
-                elif (not added) and (y < row_iter[0]):
-                    # Our level does not exist, and should be inserted before the current row iterator.
-                    # Create a new row and insert it before the current row.
-                    row_temp.push_back(y)
-                    row_temp.push_back(x)
-                    state.push_back(row_temp)
-                    state.push_back(row_iter)
+                    new_state.append(new_row)
+                elif (not added) and (y < row[0]):
+                    # State does not include this row,
+                    # so create a new row
+                    new_row = [y, x]
+                    new_state.append(new_row)
                     added = True
-
+                    # Also append the existing row
+                    new_state.append(row)
                 else:
-                    # Pass current row along to the final state
-                    state.push_back(row_iter)
+                    new_state.append(row)
 
             if added is False:
-                raise Exception(f"Error adding cell ({x},{y}): temp row = {row_temp}")
+                raise Exception(f"Error adding cell ({x},{y}): new_state = {new_state}")
 
+            return new_state
 
-    cdef _empty_neighbors():
-        cdef vector[int] empty_neighbors
-        cdef int i
-        for i in range(3):
-            empty_neighbors.push_back(-1)
-        return empty_neighbors
-
-    cdef get_neighbors_from_alive(self, int x, int y, int i, vector[vector[int]] state, int[8][3] possible_neighbors_list):
-        """
-        The following two functions look the same but are slightly different.
-        This function is for dead cells that become alive.
-        Below function is for dead cells that come alive because of these cells.
-        """
+    def get_neighbors_from_alive(self, x, y, i, state, possible_neighbors_list):
         neighbors = 0
         neighbors1 = 0
         neighbors2 = 0
-
-        cdef int[3] empty_neighbor = [-1, -1, -1]
 
         # 1 row above current cell
         if i >= 1:
             if state[i - 1][0] == (y - 1):
                 for k in range(self.top_pointer, len(state[i - 1])):
                     if state[i - 1][k] >= (x - 1):
-                        
+
                         # NW
                         if state[i - 1][k] == (x - 1):
-                            possible_neighbors_list[0] = empty_neighbor
+                            possible_neighbors_list[0] = None
                             self.top_pointer = k + 1
                             neighbors += 1
                             xx = state[i - 1][k]
@@ -331,7 +308,7 @@ cdef class Life:
 
                         # N
                         if state[i - 1][k] == x:
-                            possible_neighbors_list[1] = empty_neighbor
+                            possible_neighbors_list[1] = None
                             self.top_pointer = k
                             neighbors += 1
                             xx = state[i - 1][k]
@@ -344,7 +321,7 @@ cdef class Life:
 
                         # NE
                         if state[i - 1][k] == (x + 1):
-                            possible_neighbors_list[2] = empty_neighbor
+                            possible_neighbors_list[2] = None
                             if k == 1:
                                 self.top_pointer = 1
                             else:
@@ -368,7 +345,7 @@ cdef class Life:
 
                 # W
                 if state[i][k] == (x - 1):
-                    possible_neighbors_list[3] = empty_neighbor
+                    possible_neighbors_list[3] = None
                     neighbors += 1
                     xx = state[i][k]
                     yy = state[i][0]
@@ -380,7 +357,7 @@ cdef class Life:
 
                 # E
                 if state[i][k] == (x + 1):
-                    possible_neighbors_list[4] = empty_neighbor
+                    possible_neighbors_list[4] = None
                     neighbors += 1
                     xx = state[i][k]
                     yy = state[i][0]
@@ -402,7 +379,7 @@ cdef class Life:
 
                         # SW
                         if state[i + 1][k] == (x - 1):
-                            possible_neighbors_list[5] = empty_neighbor
+                            possible_neighbors_list[5] = None
                             self.bottom_pointer = k + 1
                             neighbors += 1
                             xx = state[i + 1][k]
@@ -415,7 +392,7 @@ cdef class Life:
 
                         # S
                         if state[i + 1][k] == x:
-                            possible_neighbors_list[6] = empty_neighbor
+                            possible_neighbors_list[6] = None
                             self.bottom_pointer = k
                             neighbors += 1
                             xx = state[i + 1][k]
@@ -428,7 +405,7 @@ cdef class Life:
 
                         # SE
                         if state[i + 1][k] == (x + 1):
-                            possible_neighbors_list[7] = empty_neighbor
+                            possible_neighbors_list[7] = None
                             if k == 1:
                                 self.bottom_pinter = 1
                             else:
@@ -446,7 +423,7 @@ cdef class Life:
                         if state[i + 1][k] > (x + 1):
                             break
 
-        cdef int color = 0
+        color = 0
         if neighbors1 > neighbors2:
             color = 1
         elif neighbors2 > neighbors1:
@@ -461,17 +438,19 @@ cdef class Life:
 
         return dict(neighbors=neighbors, color=color)
 
-    def get_color_from_alive(self, int x, int y):
+    def get_color_from_alive(self, x, y):
         """
+        This function seems redundant, but is slightly different.
         The above function is for dead cells that become alive.
-        This function is for dead cells that come alive because of those cells.
+        This function is for dead cells that come alive because of THOSE cells.
         """
-        cdef vector[vector[int]] state1 = self.actual_state1
-        cdef vector[vector[int]] state2 = self.actual_state2
+        state1 = self.actual_state1
+        state2 = self.actual_state2
 
-        cdef int color1 = 0, color2 = 0
+        color1 = 0
+        color2 = 0
 
-        # Color 1
+        # color1
         for i in range(len(state1)):
             yy = state1[i][0]
             if yy == (y - 1):
@@ -586,46 +565,38 @@ cdef class Life:
                 color = 2
             return color
 
-    cdef next_generation(self):
+    def next_generation(self):
         """
         Evolve the actual_state list life state to the next generation.
         """
         all_dead_neighbors = {}
 
-        cdef vector[vector[int]] new_state = []
-        cdef vector[vector[int]] new_state1 = []
-        cdef vector[vector[int]] new_state2 = []
+        new_state = []
+        new_state1 = []
+        new_state2 = []
 
-        cdef vector[int] redraw_templist
-
-        self.redraw_list.clear()
-
-        cdef int i, j, k
-        cdef int x, y
-        cdef int color
-        cdef int neighbors
-        cdef int[8][3] dead_neighbors
-        cdef int[3] dead_neighbor
+        self.redraw_list = []
 
         for i in range(len(self.actual_state)):
             self.top_pointer = 1
             self.bottom_pointer = 1
 
             for j in range(1, len(self.actual_state[i])):
-
                 x = self.actual_state[i][j]
                 y = self.actual_state[i][0]
 
                 # create a list of possible dead neighbors
                 # get_neighbors_from_alive() will pare this down
-                dead_neighbors[0] = [x - 1, y - 1, 1]
-                dead_neighbors[1] = [x, y - 1, 1]
-                dead_neighbors[2] = [x + 1, y - 1, 1]
-                dead_neighbors[3] = [x - 1, y, 1]
-                dead_neighbors[4] = [x + 1, y, 1]
-                dead_neighbors[5] = [x - 1, y + 1, 1]
-                dead_neighbors[6] = [x, y + 1, 1]
-                dead_neighbors[7] = [x + 1, y + 1, 1]
+                dead_neighbors = [
+                    [x - 1, y - 1, 1],
+                    [x, y - 1, 1],
+                    [x + 1, y - 1, 1],
+                    [x - 1, y, 1],
+                    [x + 1, y, 1],
+                    [x - 1, y + 1, 1],
+                    [x, y + 1, 1],
+                    [x + 1, y + 1, 1],
+                ]
 
                 result = self.get_neighbors_from_alive(
                     x, y, i, self.actual_state, dead_neighbors
@@ -635,7 +606,7 @@ cdef class Life:
 
                 # join dead neighbors remaining to check list
                 for dead_neighbor in dead_neighbors:
-                    if dead_neighbor[2] != -1:
+                    if dead_neighbor is not None:
                         # this cell is dead
                         xx = dead_neighbor[0]
                         yy = dead_neighbor[1]
@@ -654,18 +625,10 @@ cdef class Life:
                     elif color == 2:
                         new_state2 = self.add_cell(x, y, new_state2)
                     # Keep cell alive
-                    redraw_templist.clear()
-                    redraw_templist.push_back(x)
-                    redraw_templist.push_back(y)
-                    redraw_templist.push_back(2)
-                    self.redraw_list.push_back(redraw_templist)
+                    self.redraw_list.append([x, y, 2])
                 else:
                     # Kill cell
-                    redraw_templist.clear()
-                    redraw_templist.push_back(x)
-                    redraw_templist.push_back(y)
-                    redraw_templist.push_back(0)
-                    self.redraw_list.push_back(redraw_templist)
+                    self.redraw_list.append([x, y, 0])
 
         # Process dead neighbors
         for key in all_dead_neighbors:
@@ -685,11 +648,7 @@ cdef class Life:
                 elif color == 2:
                     new_state2 = self.add_cell(t1, t2, new_state2)
 
-                redraw_templist.clear()
-                redraw_templist.push_back(t1)
-                redraw_templist.push_back(t2)
-                redraw_templist.push_back(1)
-                self.redraw_list.push_back(redraw_templist)
+                self.redraw_list.append([t1, t2, 1])
 
         self.actual_state = new_state
         self.actual_state1 = new_state1
@@ -697,47 +656,60 @@ cdef class Life:
 
         return self.get_live_counts()
 
-    def _count_live_cells(self, vector[vector[int]] state):
-        cdef int livecells = 0
-        cdef int statelength = len(state)
-
-        for i in range(statelength):
-            if (state[i][0] >= 0) and (state[i][0] < self.rows):
-                for j in range(1, len(state[i])):
-                    if (state[i][j] >= 0) and (state[i][j] < self.columns):
-                        livecells += 1
-        return livecells
-
     def get_live_counts(self):
-        cdef float victory
-        cdef float SMOL
+        """
+        Get live counts of cells of each color, and total.
+        Compute statistics.
+        """
 
-        self.livecells  = self._count_live_cells(self.actual_state)
-        self.livecells1 = self._count_live_cells(self.actual_state1)
-        self.livecells2 = self._count_live_cells(self.actual_state2)
+        def _count_live_cells(state):
+            livecells = 0
+            for i in range(len(state)):
+                if (state[i][0] >= 0) and (state[i][0] < self.rows):
+                    for j in range(1, len(state[i])):
+                        if (state[i][j] >= 0) and (state[i][j] < self.columns):
+                            livecells += 1
+            return livecells
 
-        self.victory = 0
-        if self.livecells1 > self.livecells2:
-            self.victory = (self.livecells1 / (1.0 * self.livecells1 + self.livecells2 + self.SMOL))*100
+        livecells = _count_live_cells(self.actual_state)
+        livecells1 = _count_live_cells(self.actual_state1)
+        livecells2 = _count_live_cells(self.actual_state2)
+
+        self.livecells = livecells
+        self.livecells1 = livecells1
+        self.livecells2 = livecells2
+
+        victory = 0.0
+        SMOL = 1e-12
+        if livecells1 > livecells2:
+            victory = livecells1 / (1.0 * livecells1 + livecells2 + SMOL)
         else:
-            self.victory = (self.livecells2 / (1.0 * self.livecells1 + self.livecells2 + self.SMOL))*100
+            victory = livecells2 / (1.0 * livecells1 + livecells2 + SMOL)
+        victory = victory * 100
+        self.victory = victory
 
-        self.coverage = (self.livecells / (1.0 * self.columns * self.rows))*100
+        total_area = self.columns * self.rows
+        coverage = livecells / (1.0 * total_area)
+        coverage = coverage * 100
+        self.coverage = coverage
 
-        self.territory1 = (self.livecells1 / (1.0 * self.columns * self.rows))*100
-        self.territory2 = (self.livecells2 / (1.0 * self.columns * self.rows))*100
+        territory1 = livecells1 / (1.0 * total_area)
+        territory1 = territory1 * 100
+        territory2 = livecells2 / (1.0 * total_area)
+        territory2 = territory2 * 100
+        self.territory1 = territory1
+        self.territory2 = territory2
 
-        lc = LiveCount(
+        return dict(
             generation=self.generation,
-            liveCells=self.livecells,
-            liveCells1=self.livecells1,
-            liveCells2=self.livecells2,
-            victoryPct=self.victory,
-            coverage=self.coverage,
-            territory1=self.territory1,
-            territory2=self.territory2,
+            liveCells=livecells,
+            liveCells1=livecells1,
+            liveCells2=livecells2,
+            victoryPct=victory,
+            coverage=coverage,
+            territory1=territory1,
+            territory2=territory2,
         )
-        return lc
 
     def next_step(self):
         if self.running is False:
@@ -750,3 +722,25 @@ cdef class Life:
             live_counts = self.next_generation()
             self.update_moving_avg(live_counts)
             return live_counts
+
+
+def main():
+    gol = GOL(
+        s1='[{"30":[50,51,54,55,56]},{"31":[53]},{"32":[51]}]',
+        s2='[{"90":[25]},{"91":[27]},{"92":[24,25,28,29,30]}]',
+        rows=120,
+        columns=100,
+    )
+
+    while gol.running:
+        gol.next_step()
+        if gol.generation % 500 == 0:
+            print(f"Simulating generation {gol.generation}")
+
+    from pprint import pprint
+
+    pprint(gol.get_live_counts())
+
+
+if __name__ == "__main__":
+    main()
